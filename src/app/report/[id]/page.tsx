@@ -3,12 +3,17 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import { useAuth } from '../../../../lib/auth';
 import { getReport, getPublicReport, addReportAnalysis, updateReport } from '../../../../lib/db';
 import type { Report, TestResult, ReportAnalysis } from '../../../../lib/db';
+import ReactMarkdown from 'react-markdown';
+
 import { Timestamp } from 'next/dist/server/lib/cache-handlers/types';
 
-export default function ReportDetailPage({ params }: { params: { id: string } }) {
+export default function ReportDetailPage() {
+    const params = useParams();
+  const id = params?.id as string;
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +24,6 @@ export default function ReportDetailPage({ params }: { params: { id: string } })
 
   const { user } = useAuth();
   const router = useRouter();
-  const { id } = params;
 
   useEffect(() => {
     const fetchReport = async () => {
@@ -78,72 +82,52 @@ export default function ReportDetailPage({ params }: { params: { id: string } })
   };
 
   const analyzeReport = async () => {
-    if (!report || !user) return;
-    
-    setAnalyzing(true);
-    
-    try {
-      // Identify abnormal results
-      const abnormalResults = report.content.testResults.filter(test => {
-        // Simple algorithm: if reference range exists and value is outside it
-        if (!test.referenceRange) return false;
-        
-        const value = Number(test.value);
-        if (isNaN(value)) return false;
-        
-        // Parse reference range in format "min-max" or "< max" or "> min"
-        if (test.referenceRange.includes('-')) {
-          const [min, max] = test.referenceRange.split('-').map(parseFloat);
-          return value < min || value > max;
-        } else if (test.referenceRange.includes('<')) {
-          const max = parseFloat(test.referenceRange.replace('<', '').trim());
-          return value >= max;
-        } else if (test.referenceRange.includes('>')) {
-          const min = parseFloat(test.referenceRange.replace('>', '').trim());
-          return value <= min;
+  if (!report || !user) return;
+
+  setAnalyzing(true);
+
+  try {
+    const prompts = report.content.testResults.map(test => {
+      return `Explain what a ${test.name} value of ${test.value} ${test.unit} means in plain English. Include normal range (${
+        test.referenceRange || 'not provided'
+      }), possible causes of abnormal levels, and questions a patient might ask their doctor.`;
+    });
+
+    const sonarResponse = await fetch('/api/analyze-with-sonar', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompts })
+    });
+
+    const { analysisSummary, recommendations } = await sonarResponse.json();
+
+    const analysis: Omit<ReportAnalysis, 'createdAt'> = {
+      summary: analysisSummary,
+      abnormalResults: [], // You can optionally still compute this if needed
+      recommendations
+    };
+
+    await addReportAnalysis(report.id, analysis);
+
+    setReport(prevReport => {
+      if (!prevReport) return null;
+      return {
+        ...prevReport,
+        analysis: {
+          ...analysis,
+          createdAt: Date.now()
         }
-        
-        return false;
-      });
-      
-      // Generate analysis using a mock AI response
-      // Note: In a real app, this would call an actual AI service
-      const analysis: Omit<ReportAnalysis, 'createdAt'> = {
-        summary: `This report ${abnormalResults.length > 0 ? 'shows some abnormal results' : 'appears normal'}. ${
-          abnormalResults.length > 0 
-            ? `There ${abnormalResults.length === 1 ? 'is' : 'are'} ${abnormalResults.length} test result${abnormalResults.length === 1 ? '' : 's'} outside the reference range.` 
-            : 'All test results are within their reference ranges.'
-        }`,
-        abnormalResults,
-        recommendations: [
-          'Review these results with your healthcare provider.',
-          'Maintain regular check-ups and follow your prescribed treatment plan.',
-          abnormalResults.length > 0 ? 'Further testing may be needed to understand the abnormal results.' : 'Continue your healthy lifestyle choices.'
-        ]
       };
-      
-      // Save analysis to report
-      await addReportAnalysis(report.id, analysis);
-      
-      // Update local state
-      setReport(prevReport => {
-        if (!prevReport) return null;
-        return {
-          ...prevReport,
-          analysis: {
-            ...analysis,
-            createdAt: Date.now() 
-          }
-        };
-      });
-      
-    } catch (err) {
-      console.error('Error analyzing report:', err);
-      setError('Failed to analyze report. Please try again.');
-    } finally {
-      setAnalyzing(false);
-    }
-  };
+    });
+
+  } catch (err) {
+    console.error('Sonar analysis failed:', err);
+    setError('Failed to get AI analysis. Please try again.');
+  } finally {
+    setAnalyzing(false);
+  }
+};
+
 
   const togglePublicStatus = async () => {
     if (!report || !user) return;
@@ -391,7 +375,9 @@ export default function ReportDetailPage({ params }: { params: { id: string } })
             <div>
               <div className="bg-blue-50 p-4 rounded-md mb-4">
                 <p className="font-medium text-lg mb-2">Summary</p>
-                <p>{report.analysis.summary}</p>
+                <div className="prose prose-sm max-w-none text-gray-800">
+  <ReactMarkdown>{report.analysis.summary}</ReactMarkdown>
+</div>
                 <p className="text-sm text-gray-500 mt-2">
                   Analysis generated on {formatDate(report.analysis.createdAt)}
                 </p>
